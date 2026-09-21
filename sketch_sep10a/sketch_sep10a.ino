@@ -71,6 +71,9 @@ const float SOIL_BOTTOM_WET = 70.0;
 const float SOIL_TOP_ENOUGH = 60.0;
 const int   LIGHT_DARK_THRESHOLD = 1500;
 
+// Ручная команда имеет приоритет над автоматикой на это время
+#define MANUAL_HOLD_MS 60000UL
+
 // ============================================================
 //                    ОБЪЕКТЫ
 // ============================================================
@@ -101,7 +104,16 @@ struct {
   bool roofOpen = false;
   bool lightOn = false;
   bool wifiOk = false;
+
+  // Буфер событий "что и когда сработало"
+  char ev[5][24] = {{0},{0},{0},{0},{0}};
+  int evCount = 0;
 } state;
+
+// До какого времени millis() автоматика молчит после ручной команды
+unsigned long pumpManualUntil  = 0;
+unsigned long lightManualUntil = 0;
+unsigned long roofManualUntil  = 0;
 
 // ============================================================
 //                    ПРОТОТИПЫ
@@ -114,6 +126,15 @@ void drawScreen();
 // ============================================================
 void relayOn(int pin)  { digitalWrite(pin, RELAY_ACTIVE_LOW ? LOW : HIGH); }
 void relayOff(int pin) { digitalWrite(pin, RELAY_ACTIVE_LOW ? HIGH : LOW); }
+
+// Добавляет событие в буфер (отправляется в телеметрии)
+void pushEvent(const char* msg) {
+  if (state.evCount < 5) {
+    strncpy(state.ev[state.evCount], msg, 23);
+    state.ev[state.evCount][23] = '\0';
+    state.evCount++;
+  }
+}
 
 // ============================================================
 //                    ЧТЕНИЕ ДАТЧИКОВ
@@ -160,26 +181,35 @@ void readAllSensors() {
 //                    АВТОМАТИКА
 // ============================================================
 void updateRoof() {
+  // Ручная команда имеет приоритет ещё <MANUAL_HOLD_MS>
+  if (millis() < roofManualUntil) return;
+
   // Управляем крышей по внутреннему DHT (temp1)
   if (isnan(state.temp1)) return;
 
   if (state.temp1 > TEMP_OPEN_ROOF && !state.roofOpen) {
     roofServo.write(90);
     state.roofOpen = true;
+    pushEvent("roof_open");
     Serial.println("[AUTO] Крыша ОТКРЫТА");
   } else if (state.temp1 < TEMP_CLOSE_ROOF && state.roofOpen) {
     roofServo.write(0);
     state.roofOpen = false;
+    pushEvent("roof_close");
     Serial.println("[AUTO] Крыша ЗАКРЫТА");
   }
 }
 
 void updatePump() {
+  // Ручная команда имеет приоритет ещё <MANUAL_HOLD_MS>
+  if (millis() < pumpManualUntil) return;
+
   if (state.soil1 < SOIL_TOP_DRY &&
       state.soil2 < SOIL_BOTTOM_WET &&
       !state.pumpOn) {
     relayOn(RELAY_PUMP);
     state.pumpOn = true;
+    pushEvent("pump_on");
     Serial.println("[AUTO] Насос ВКЛ");
   }
 
@@ -187,19 +217,25 @@ void updatePump() {
        state.soil1 >= SOIL_TOP_ENOUGH) && state.pumpOn) {
     relayOff(RELAY_PUMP);
     state.pumpOn = false;
+    pushEvent("pump_off");
     Serial.println("[AUTO] Насос ВЫКЛ");
   }
 }
 
 void updateLight() {
+  // Ручная команда имеет приоритет ещё <MANUAL_HOLD_MS>
+  if (millis() < lightManualUntil) return;
+
   // Досветка по внутреннему фоторезистору
   if (state.light1 < LIGHT_DARK_THRESHOLD && !state.lightOn) {
     relayOn(RELAY_LIGHT);
     state.lightOn = true;
+    pushEvent("light_on");
     Serial.println("[AUTO] Досветка ВКЛ");
   } else if (state.light1 >= LIGHT_DARK_THRESHOLD && state.lightOn) {
     relayOff(RELAY_LIGHT);
     state.lightOn = false;
+    pushEvent("light_off");
     Serial.println("[AUTO] Досветка ВЫКЛ");
   }
 }
@@ -219,7 +255,7 @@ void sendTelemetry() {
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-API-Key", API_KEY);
 
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<1024> doc;
   doc["soil1_raw"]      = state.raw1;
   doc["soil1_moisture"] = state.soil1;
   doc["soil2_raw"]      = state.raw2;
@@ -237,6 +273,18 @@ void sendTelemetry() {
   doc["light1"] = state.light1;
   doc["light2"] = state.light2;
 
+  // Состояние исполнительных механизмов
+  doc["pump"]  = state.pumpOn;
+  doc["light"] = state.lightOn;
+  doc["roof"]  = state.roofOpen;
+
+  // События "что и когда сработало"
+  if (state.evCount > 0) {
+    JsonArray ev = doc.createNestedArray("ev");
+    for (int i = 0; i < state.evCount; i++) ev.add(state.ev[i]);
+    state.evCount = 0;
+  }
+
   String body;
   serializeJson(doc, body);
 
@@ -246,7 +294,7 @@ void sendTelemetry() {
 }
 
 void sendJsonSerial() {
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<1024> doc;
   doc["soil1_raw"]      = state.raw1;
   doc["soil1_moisture"] = state.soil1;
   doc["soil2_raw"]      = state.raw2;
@@ -257,6 +305,17 @@ void sendJsonSerial() {
   if (!isnan(state.hum2))  doc["humidity2"]    = state.hum2;
   doc["light1"] = state.light1;
   doc["light2"] = state.light2;
+
+  doc["pump"]  = state.pumpOn;
+  doc["light"] = state.lightOn;
+  doc["roof"]  = state.roofOpen;
+
+  // События "что и когда сработало"
+  if (state.evCount > 0) {
+    JsonArray ev = doc.createNestedArray("ev");
+    for (int i = 0; i < state.evCount; i++) ev.add(state.ev[i]);
+    state.evCount = 0;
+  }
 
   serializeJson(doc, Serial);
   Serial.println();
@@ -282,12 +341,12 @@ void checkCommands() {
         String c = cmd.as<String>();
         Serial.printf("[NET] CMD: %s\n", c.c_str());
 
-        if (c == "pump_on")    { relayOn(RELAY_PUMP);   state.pumpOn = true; }
-        if (c == "pump_off")   { relayOff(RELAY_PUMP);  state.pumpOn = false; }
-        if (c == "roof_open")  { roofServo.write(90);   state.roofOpen = true; }
-        if (c == "roof_close") { roofServo.write(0);    state.roofOpen = false; }
-        if (c == "light_on")   { relayOn(RELAY_LIGHT);  state.lightOn = true; }
-        if (c == "light_off")  { relayOff(RELAY_LIGHT); state.lightOn = false; }
+        if (c == "pump_on")    { relayOn(RELAY_PUMP);   state.pumpOn = true;  pushEvent("pump_on");   pumpManualUntil  = millis() + MANUAL_HOLD_MS; }
+        if (c == "pump_off")   { relayOff(RELAY_PUMP);  state.pumpOn = false; pushEvent("pump_off");  pumpManualUntil  = millis() + MANUAL_HOLD_MS; }
+        if (c == "roof_open")  { roofServo.write(90);   state.roofOpen = true;  pushEvent("roof_open");  roofManualUntil = millis() + MANUAL_HOLD_MS; }
+        if (c == "roof_close") { roofServo.write(0);    state.roofOpen = false; pushEvent("roof_close"); roofManualUntil = millis() + MANUAL_HOLD_MS; }
+        if (c == "light_on")   { relayOn(RELAY_LIGHT);  state.lightOn = true;  pushEvent("light_on");   lightManualUntil = millis() + MANUAL_HOLD_MS; }
+        if (c == "light_off")  { relayOff(RELAY_LIGHT); state.lightOn = false; pushEvent("light_off");  lightManualUntil = millis() + MANUAL_HOLD_MS; }
       }
     }
   }
@@ -309,16 +368,16 @@ void handleSerialCommands() {
 
   Serial.printf("[SERIAL CMD] %s\n", line.c_str());
 
-  if (line == "pump_on")   { relayOn(RELAY_PUMP);   state.pumpOn = true;   Serial.println("OK"); return; }
-  if (line == "pump_off")  { relayOff(RELAY_PUMP);  state.pumpOn = false;  Serial.println("OK"); return; }
-  if (line == "roof_open") { roofServo.write(90);   state.roofOpen = true;  Serial.println("OK"); return; }
-  if (line == "roof_close"){ roofServo.write(0);    state.roofOpen = false; Serial.println("OK"); return; }
-  if (line == "light_on")  { relayOn(RELAY_LIGHT);  state.lightOn = true;  Serial.println("OK"); return; }
-  if (line == "light_off") { relayOff(RELAY_LIGHT); state.lightOn = false; Serial.println("OK"); return; }
+  if (line == "pump_on")   { relayOn(RELAY_PUMP);   state.pumpOn = true;   pushEvent("pump_on");   pumpManualUntil  = millis() + MANUAL_HOLD_MS; Serial.println("OK"); return; }
+  if (line == "pump_off")  { relayOff(RELAY_PUMP);  state.pumpOn = false;  pushEvent("pump_off");  pumpManualUntil  = millis() + MANUAL_HOLD_MS; Serial.println("OK"); return; }
+  if (line == "roof_open") { roofServo.write(90);   state.roofOpen = true;  pushEvent("roof_open");  roofManualUntil = millis() + MANUAL_HOLD_MS; Serial.println("OK"); return; }
+  if (line == "roof_close"){ roofServo.write(0);    state.roofOpen = false; pushEvent("roof_close"); roofManualUntil = millis() + MANUAL_HOLD_MS; Serial.println("OK"); return; }
+  if (line == "light_on")  { relayOn(RELAY_LIGHT);  state.lightOn = true;  pushEvent("light_on");   lightManualUntil = millis() + MANUAL_HOLD_MS; Serial.println("OK"); return; }
+  if (line == "light_off") { relayOff(RELAY_LIGHT); state.lightOn = false; pushEvent("light_off");  lightManualUntil = millis() + MANUAL_HOLD_MS; Serial.println("OK"); return; }
 
-  if (line == "p") { state.pumpOn = !state.pumpOn; state.pumpOn ? relayOn(RELAY_PUMP) : relayOff(RELAY_PUMP); Serial.printf("[MANUAL] Насос %s\n", state.pumpOn ? "ON" : "OFF"); }
-  if (line == "l") { state.lightOn = !state.lightOn; state.lightOn ? relayOn(RELAY_LIGHT) : relayOff(RELAY_LIGHT); Serial.printf("[MANUAL] Досветка %s\n", state.lightOn ? "ON" : "OFF"); }
-  if (line == "r") { state.roofOpen = !state.roofOpen; roofServo.write(state.roofOpen ? 90 : 0); Serial.printf("[MANUAL] Крыша %s\n", state.roofOpen ? "OPEN" : "CLOSED"); }
+  if (line == "p") { state.pumpOn = !state.pumpOn; state.pumpOn ? relayOn(RELAY_PUMP) : relayOff(RELAY_PUMP); pumpManualUntil = millis() + MANUAL_HOLD_MS; pushEvent(state.pumpOn ? "pump_on" : "pump_off"); Serial.printf("[MANUAL] Насос %s\n", state.pumpOn ? "ON" : "OFF"); }
+  if (line == "l") { state.lightOn = !state.lightOn; state.lightOn ? relayOn(RELAY_LIGHT) : relayOff(RELAY_LIGHT); lightManualUntil = millis() + MANUAL_HOLD_MS; pushEvent(state.lightOn ? "light_on" : "light_off"); Serial.printf("[MANUAL] Досветка %s\n", state.lightOn ? "ON" : "OFF"); }
+  if (line == "r") { state.roofOpen = !state.roofOpen; roofServo.write(state.roofOpen ? 90 : 0); roofManualUntil = millis() + MANUAL_HOLD_MS; pushEvent(state.roofOpen ? "roof_open" : "roof_close"); Serial.printf("[MANUAL] Крыша %s\n", state.roofOpen ? "OPEN" : "CLOSED"); }
   if (line == "s") printSerial();
   if (line == "h") Serial.println("Команды: pump_on/off, roof_open/close, light_on/off, p, l, r, s, h");
 }
