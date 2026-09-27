@@ -95,6 +95,9 @@ struct {
   // DHT #2 (наружный) — НОВЫЙ
   float temp2 = 0, hum2 = 0;
 
+  // Средние значения по двум DHT22 (управляем по ним)
+  float temp_avg = NAN, hum_avg = NAN;
+
   // Освещённость
   int light1 = 0;   // внутренний
   int light2 = 0;   // НОВЫЙ: наружный
@@ -172,6 +175,18 @@ void readAllSensors() {
   if (!isnan(t2)) state.temp2 = t2;
   if (!isnan(h2)) state.hum2  = h2;
 
+  // Средние значения по двум DHT22 — компоненты работают по ним.
+  // Среднее считается ТОЛЬКО когда оба датчика дали валидное значение.
+  // Если один датчик не читается — сохраняем последнее среднее,
+  // чтобы решение (например, по крыше) не зависело от одного датчика.
+  if (!isnan(t1) && !isnan(t2)) {
+    state.temp_avg = (state.temp1 + state.temp2) / 2.0f;
+  }
+
+  if (!isnan(h1) && !isnan(h2)) {
+    state.hum_avg = (state.hum1 + state.hum2) / 2.0f;
+  }
+
   // Освещённость — оба фоторезистора
   state.light1 = analogRead(LIGHT1_ADC);
   state.light2 = analogRead(LIGHT2_ADC);   // НОВЫЙ
@@ -184,15 +199,15 @@ void updateRoof() {
   // Ручная команда имеет приоритет ещё <MANUAL_HOLD_MS>
   if (millis() < roofManualUntil) return;
 
-  // Управляем крышей по внутреннему DHT (temp1)
-  if (isnan(state.temp1)) return;
+  // Управляем крышей по среднему значению двух DHT22
+  if (isnan(state.temp_avg)) return;
 
-  if (state.temp1 > TEMP_OPEN_ROOF && !state.roofOpen) {
+  if (state.temp_avg > TEMP_OPEN_ROOF && !state.roofOpen) {
     roofServo.write(90);
     state.roofOpen = true;
     pushEvent("roof_open");
     Serial.println("[AUTO] Крыша ОТКРЫТА");
-  } else if (state.temp1 < TEMP_CLOSE_ROOF && state.roofOpen) {
+  } else if (state.temp_avg < TEMP_CLOSE_ROOF && state.roofOpen) {
     roofServo.write(0);
     state.roofOpen = false;
     pushEvent("roof_close");
@@ -281,6 +296,10 @@ void sendTelemetry() {
   if (!isnan(state.temp2)) doc["temperature2"] = state.temp2;
   if (!isnan(state.hum2))  doc["humidity2"]    = state.hum2;
 
+  // Средние DHT22
+  if (!isnan(state.temp_avg)) doc["temperature_avg"] = state.temp_avg;
+  if (!isnan(state.hum_avg))  doc["humidity_avg"]    = state.hum_avg;
+
   // Освещённость — НОВОЕ ПОЛЕ
   doc["light1"] = state.light1;
   doc["light2"] = state.light2;
@@ -315,6 +334,8 @@ void sendJsonSerial() {
   if (!isnan(state.hum1))  doc["humidity"]     = state.hum1;
   if (!isnan(state.temp2)) doc["temperature2"] = state.temp2;
   if (!isnan(state.hum2))  doc["humidity2"]    = state.hum2;
+  if (!isnan(state.temp_avg)) doc["temperature_avg"] = state.temp_avg;
+  if (!isnan(state.hum_avg))  doc["humidity_avg"]    = state.hum_avg;
   doc["light1"] = state.light1;
   doc["light2"] = state.light2;
 
