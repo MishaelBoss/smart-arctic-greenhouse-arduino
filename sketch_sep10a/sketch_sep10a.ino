@@ -20,7 +20,7 @@ const char* WIFI_PASS = "17922343";
 // ============================================================
 const char* API_BASE = "http://192.168.0.115:8000";
 const char* API_KEY  = "KII28tN1eh9xZkU_2jw1vlrXxHEkQ8ZL";
-const int   DEVICE_ID = 1;
+const int   DEVICE_ID = 3;
 
 // ============================================================
 //                    OLED
@@ -238,13 +238,13 @@ void updateLight() {
   // Ручная команда имеет приоритет ещё <MANUAL_HOLD_MS>
   if (millis() < lightManualUntil) return;
 
-  // Досветка по внутреннему фоторезистору
-  if (state.light1 < LIGHT_DARK_THRESHOLD && !state.lightOn) {
+  // Досветка по внутреннему или наружному фоторезистору
+  if ((state.light1 < LIGHT_DARK_THRESHOLD || state.light2 < LIGHT_DARK_THRESHOLD) && !state.lightOn) {
     relayOn(RELAY_LIGHT);
     state.lightOn = true;
     pushEvent("light_on");
     Serial.println("[AUTO] Досветка ВКЛ");
-  } else if (state.light1 >= LIGHT_DARK_THRESHOLD && state.lightOn) {
+  } else if (state.light1 >= LIGHT_DARK_THRESHOLD && state.light2 >= LIGHT_DARK_THRESHOLD && state.lightOn) {
     relayOff(RELAY_LIGHT);
     state.lightOn = false;
     pushEvent("light_off");
