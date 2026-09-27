@@ -200,15 +200,27 @@ void updateRoof() {
   }
 }
 
+unsigned long pumpStartTime = 0;
+const unsigned long PUMP_MAX_MS = 30000UL;
+
 void updatePump() {
   // Ручная команда имеет приоритет ещё <MANUAL_HOLD_MS>
   if (millis() < pumpManualUntil) return;
+
+  if (state.pumpOn && pumpStartTime > 0 && millis() - pumpStartTime > PUMP_MAX_MS) {
+    relayOff(RELAY_PUMP);
+    state.pumpOn = false;
+    pushEvent("pump_timeout");
+    Serial.println("[SAFETY] Насос выключен по таймауту");
+    return;
+  }
 
   if (state.soil1 < SOIL_TOP_DRY &&
       state.soil2 < SOIL_BOTTOM_WET &&
       !state.pumpOn) {
     relayOn(RELAY_PUMP);
     state.pumpOn = true;
+    pumpStartTime = millis();
     pushEvent("pump_on");
     Serial.println("[AUTO] Насос ВКЛ");
   }
